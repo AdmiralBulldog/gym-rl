@@ -60,6 +60,27 @@ def get_screen():
     # Resize, and add a batch dimension (BCHW)
     return resize(screen).unsqueeze(0)
 
+episode_durations = []
+
+
+def plot_durations():
+    plt.figure(2)
+    plt.clf()
+    durations_t = torch.tensor(episode_durations, dtype=torch.float)
+    plt.title('Training...')
+    plt.xlabel('Episode')
+    plt.ylabel('Duration')
+    plt.plot(durations_t.numpy())
+    # Take 100 episode averages and plot them too
+    if len(durations_t) >= 100:
+        means = durations_t.unfold(0, 100, 1).mean(1).view(-1)
+        means = torch.cat((torch.zeros(99), means))
+        plt.plot(means.numpy())
+
+    plt.pause(0.001)  # pause a bit so that plots are updated
+    if is_ipython:
+        display.clear_output(wait=True)
+        display.display(plt.gcf())
 
 class ExperienceMemory():
     def __init__(self, capacity):
@@ -108,8 +129,7 @@ class Agent():
         self.eps_decay = eps_decay
         self.gamma = gamma
         self.num_actions = num_actions
-        self.batch_size = 64
-        self.tgt_update_interval = 500
+        self.batch_size = 32
         self.memory = ExperienceMemory(10000)
         self.optimizer = optim.RMSprop(self.policy_net.parameters())
         self.loss_func = nn.SmoothL1Loss()
@@ -136,12 +156,12 @@ class Agent():
             target_q_values = rewards_stack.unsqueeze(1) + self.gamma * next_state_maxes
 
             self.optimizer.zero_grad()
-            loss_func = nn.SmoothL1Loss()
-            loss = self.loss_func(q_values, target_q_values)
-            self.last_loss = loss.item()
+            #loss_func = nn.SmoothL1Loss()
+            loss = F.smooth_l1_loss(q_values, target_q_values)
+            #self.last_loss = loss.item()
             loss.backward()
-            for param in self.policy_net.parameters():
-                param.grad.data.clamp_(-1, 1)
+            #for param in self.policy_net.parameters():
+            #    param.grad.data.clamp_(-1, 1)
             self.optimizer.step()
             
     def update_tgt_net(self):
@@ -168,13 +188,17 @@ for e in range(episodes):
     for t in count():
         action = agnt.select_act(state)
         _, reward, done, _ = env.step(action.item())
-        if done:
-            print(f"Episode {e} finished after {t} timesteps")
-            print(f"Loss: {agnt.last_loss}")
-            break
         last_screen = current_screen
         current_screen = get_screen()
         next_state = last_screen - current_screen
+        if done:
+            reward = torch.tensor(-reward)
+            agnt.memory.store((next_state, reward, action, state))
+            print(f"Episode {e} finished after {t} timesteps")
+            print(f"Loss: {agnt.last_loss}, reward: {reward}")
+            episode_durations.append(t+1)
+            plot_durations()
+            break
         reward = torch.tensor(reward)
         agnt.memory.store((next_state, reward, action, state))
         state = next_state
