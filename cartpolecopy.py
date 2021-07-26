@@ -89,10 +89,10 @@ class DQNN(nn.Module):
 
 
 class Agent():
-    def __init__(self, state_space, action_space, gamma, eps_decay, memory_size, loss, optimizer, learning_rate, eps_max=0.9, eps_min=0.05):
+    def __init__(self, state_space, action_space, gamma, memory_size, loss, optimizer, learning_rate, epsilon, eps_decay, eps_min):
         self.policy_net = DQNN(state_space, action_space)
         self.tgt_net = DQNN(state_space, action_space)
-        self.eps_max = eps_max
+        self.epsilon = epsilon
         self.eps_min = eps_min
         self.eps_decay = eps_decay
         self.gamma = gamma
@@ -105,8 +105,8 @@ class Agent():
         self.last_loss = 999
     def select_act(self, state):
         sample = random.random()
-        epsilon = self.eps_min + (self.eps_max-self.eps_min) * math.exp(-1. * steps_done / self.eps_decay)
-        if sample < epsilon:
+        self.epsilon = max(self.eps_min, self.epsilon * eps_decay)
+        if sample < self.epsilon:
             return torch.tensor(random.randrange(self.num_actions))
         else:
             with torch.no_grad():
@@ -115,7 +115,7 @@ class Agent():
         if len(self.memory) < self.batch_size:
             return
         else:    
-            next_states, rewards, actions, states = list(zip(*self.memory.sample(self.batch_size)))
+            next_states, rewards, actions, states, done = list(zip(*self.memory.sample(self.batch_size)))
             next_states_stack = torch.cat(next_states, dim=0)
             rewards_stack = torch.stack(rewards, dim=0)
             actions_stack = torch.stack(actions, dim=0)
@@ -123,7 +123,8 @@ class Agent():
             q_values = self.policy_net(states_stack).gather(1, actions_stack.view(-1,1))
             next_state_maxes = self.tgt_net(next_states_stack).max(1)[0].unsqueeze(1).detach()
             target_q_values = rewards_stack.unsqueeze(1) + self.gamma * next_state_maxes
-
+            for i in range(self.batch_size):
+                 if done[i]: target_q_values[i] = rewards_stack[i]
             self.optimizer.zero_grad()
             loss = self.loss_func(q_values, target_q_values)
             #loss = F.mse_loss(q_values, target_q_values)
@@ -140,24 +141,31 @@ class Agent():
 
 
 
-episodes = 1000
 env.reset()
+
+episodes = 1000
+steps_done = 0
+
 action_space = env.action_space.n
 state_space = 4
-tgt_update_interval = 200
-steps_done = 0
-eps_decay = 200
+tgt_update_interval = 10
+epsilon = 0.99
+eps_decay = 0.995
+eps_min = 0.05
 gamma = 0.95
 memory_size = 10000
 loss_f = "mse"
 optimizer = "adam"
 lr = 0.0001
-agnt = Agent(state_space,action_space, gamma, eps_decay, memory_size, loss_f, optimizer, lr)
+agnt = Agent(state_space,action_space, gamma, memory_size, loss_f, optimizer, lr, epsilon, eps_decay, eps_min)
 
 
 with mlflow.start_run():
     mlflow.log_param("tgt_update_interval", tgt_update_interval)
+    mlflow.log_param("memory_size", memory_size)
+    mlflow.log_param("epsilon", epsilon)
     mlflow.log_param("eps_decay", eps_decay)
+    mlflow.log_param("eps_min", eps_min)
     mlflow.log_param("gamma", gamma)
     mlflow.log_param("loss", loss_f)
     mlflow.log_param("optmizer", optimizer)
@@ -172,14 +180,14 @@ with mlflow.start_run():
             next_state, reward, done, _ = env.step(action.item())
             next_state = torch.tensor(next_state, dtype=torch.float).unsqueeze(0)
             if done:
-                reward = torch.tensor(-reward)
-                agnt.memory.store((next_state, reward, action, state))
+                reward = torch.tensor(0)
+                agnt.memory.store((next_state, reward, action, state, done))
                 print(f"Episode {e} finished after {t} timesteps")
                 episode_durations.append(t+1)
                 duration_means.append(sum(episode_durations[-100:]) / 100)
                 break
             reward = torch.tensor(reward)
-            agnt.memory.store((next_state, reward, action, state))
+            agnt.memory.store((next_state, reward, action, state, done))
             state = next_state
             agnt.learn()
             steps_done += 1
