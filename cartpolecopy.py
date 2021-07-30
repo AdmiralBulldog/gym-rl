@@ -73,11 +73,10 @@ class DQNN(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(DQNN, self).__init__()
         self.lin1 = nn.Linear(input_dim, 32)
-        self.norm1 = nn.LayerNorm(32)
+        self.norm1 = nn.BatchNorm1d(32)
         self.lin2 = nn.Linear(32,32)
-        self.norm2 = nn.LayerNorm(32)
+        self.norm2 = nn.BatchNorm1d(32)
         self.lin3 = nn.Linear(32, output_dim)
-        #self.bn1 = nn.BatchNorm2d(16)
 
     def forward(self, x):
         x = x.to(device)

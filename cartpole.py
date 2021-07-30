@@ -59,9 +59,9 @@ class DQNN(nn.Module):
     def __init__(self, input_dim, output_dim):
         super(DQNN, self).__init__()
         self.lin1 = nn.Linear(input_dim, 32)
-        self.norm1 = nn.LayerNorm(32)
+        self.norm1 = nn.BatchNorm1d(32)
         self.lin2 = nn.Linear(32,32)
-        self.norm2 = nn.LayerNorm(32)
+        self.norm2 = nn.BatchNorm1d(32)
         self.lin3 = nn.Linear(32, output_dim)
         #self.bn1 = nn.BatchNorm2d(16)
 
@@ -75,7 +75,7 @@ class DQNN(nn.Module):
 
 
 class Agent():
-    def __init__(self, state_space, action_space, gamma, memory_size, learning_rate, epsilon, eps_decay, eps_min):
+    def __init__(self, state_space, action_space, gamma, memory_size, learning_rate, epsilon, eps_decay, eps_min, batch_size):
         self.policy_net = DQNN(state_space, action_space)
         self.tgt_net = DQNN(state_space, action_space)
         self.epsilon = epsilon
@@ -83,13 +83,14 @@ class Agent():
         self.eps_decay = eps_decay
         self.gamma = gamma
         self.num_actions = action_space
-        self.batch_size = 32
+        self.batch_size = batch_size
         self.memory = ExperienceMemory(memory_size)
         #self.optimizer = optim.RMSprop(self.policy_net.parameters())
         self.optimizer = optim.Adam(self.policy_net.parameters(), learning_rate)
         self.loss_func = nn.MSELoss()
         self.last_loss = 999
     def select_act(self, state):
+        self.policy_net.eval()
         sample = random.random()
         self.epsilon = max(self.eps_min, self.epsilon * eps_decay)
         if sample < self.epsilon:
@@ -100,23 +101,25 @@ class Agent():
     def learn(self):
         if len(self.memory) < self.batch_size:
             return
-        else:    
-            next_states, rewards, actions, states, done = list(zip(*self.memory.sample(self.batch_size)))
-            next_states_stack = torch.cat(next_states, dim=0)
-            rewards_stack = torch.stack(rewards, dim=0)
-            actions_stack = torch.stack(actions, dim=0)
-            states_stack = torch.cat(states, dim=0)
-            q_values = self.policy_net(states_stack).gather(1, actions_stack.view(-1,1))
-            next_state_maxes = self.tgt_net(next_states_stack).max(1)[0].unsqueeze(1).detach()
-            target_q_values = rewards_stack.unsqueeze(1) + self.gamma * next_state_maxes
-            self.optimizer.zero_grad()
-            loss = self.loss_func(q_values, target_q_values)
-            #loss = F.mse_loss(q_values, target_q_values)
-            self.last_loss = loss.item()
-            loss.backward()
-            for param in self.policy_net.parameters():
-                param.grad.data.clamp_(-1, 1)
-            self.optimizer.step()
+        self.policy_net.train()    
+        next_states, rewards, actions, states, done = list(zip(*self.memory.sample(self.batch_size)))
+        next_states_stack = torch.cat(next_states, dim=0)
+        rewards_stack = torch.stack(rewards, dim=0)
+        actions_stack = torch.stack(actions, dim=0)
+        states_stack = torch.cat(states, dim=0)
+        q_values = self.policy_net(states_stack).gather(1, actions_stack.view(-1,1))
+        next_state_maxes = self.tgt_net(next_states_stack).max(1)[0].unsqueeze(1).detach()
+        target_q_values = rewards_stack.unsqueeze(1) + self.gamma * next_state_maxes
+        for i in range(self.batch_size):
+            if done[i]: target_q_values[i] = rewards_stack[i]
+        self.optimizer.zero_grad()
+        loss = self.loss_func(q_values, target_q_values)
+        #loss = F.mse_loss(q_values, target_q_values)
+        self.last_loss = loss.item()
+        loss.backward()
+        for param in self.policy_net.parameters():
+            param.grad.data.clamp_(-1, 1)
+        self.optimizer.step()
             
     def update_tgt_net(self):
         self.tgt_net.load_state_dict(self.policy_net.state_dict())        
@@ -127,19 +130,20 @@ class Agent():
 
 env.reset()
 
-episodes = 1000
+episodes = 100000
 steps_done = 0
 
 action_space = env.action_space.n
 state_space = 4
-tgt_update_interval = 10
+tgt_update_interval = 150
+batch_size = 64
 epsilon = 0.99
 eps_decay = 0.995
 eps_min = 0.05
 gamma = 0.95
 memory_size = 10000
 lr = 0.0001
-agnt = Agent(state_space,action_space, gamma, memory_size, lr, epsilon, eps_decay, eps_min)
+agnt = Agent(state_space,action_space, gamma, memory_size, lr, epsilon, eps_decay, eps_min, batch_size)
 done_reward = 0
 
 with mlflow.start_run():
@@ -154,6 +158,7 @@ with mlflow.start_run():
     mlflow.log_param("optmizer", str(agnt.optimizer))
     mlflow.log_param("lr", lr)
     mlflow.log_param("done_reward", done_reward)
+    mlflow.log_param("batch_size", batch_size)
 
     for e in range(episodes):
         state = env.reset()
