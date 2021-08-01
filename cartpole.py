@@ -136,7 +136,7 @@ steps_done = 0
 action_space = env.action_space.n
 state_space = 4
 tgt_update_interval = 150
-batch_size = 64
+batch_size = 32
 epsilon = 0.99
 eps_decay = 0.995
 eps_min = 0.05
@@ -172,7 +172,7 @@ with mlflow.start_run():
             if done:
                 reward = torch.tensor(done_reward)
                 agnt.memory.store((next_state, reward, action, state, done))
-                print(f"Episode {e} finished after {t} timesteps")
+                print(f"Episode {e} finished after {t} timesteps, last loss: {agnt.get_last_loss()}")
                 episode_durations.append(t+1)
                 duration_means.append(sum(episode_durations[-100:]) / 100)
                 break
@@ -188,6 +188,7 @@ with mlflow.start_run():
         mlflow.log_metric("episodes done", e)
         mlflow.log_metric("last_avg_score", duration_means[-1])
         mlflow.log_metric("last_score", episode_durations[-1])
+        mlflow.log_metric("last_loss", agnt.get_last_loss())
             
 
 env.close()        

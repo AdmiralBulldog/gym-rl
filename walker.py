@@ -2,6 +2,7 @@ import gym
 import math
 import random
 import numpy as np
+import copy
 import matplotlib
 import matplotlib.pyplot as plt
 import matplotlib.animation as animation
@@ -15,7 +16,7 @@ import torch.optim as optim
 import torch.nn.functional as F
 
 
-env = gym.make('CartPole-v1').unwrapped
+env = gym.make('BipedalWalker-v3').unwrapped
 
 is_ipython = 'inline' in matplotlib.get_backend()
 if is_ipython:
@@ -67,7 +68,7 @@ class DQNN_actor(nn.Module):
         x = x.to(device)
         x = F.relu(self.norm1(self.lin1(x)))
         x = F.relu(self.norm2(self.lin2(x)))
-        x = F.relu(self.lin3(x))
+        x = torch.tanh(self.lin3(x))
         return x
 
 class DQNN_critic(nn.Module):
@@ -77,16 +78,44 @@ class DQNN_critic(nn.Module):
         self.norm1 = nn.BatchNorm1d(100)
         self.lin2_s = nn.Linear(100,100)
         self.lin1_a = nn.Linear(action_space, 100)
+        self.lin1 = nn.Linear(100, 1)
 
     def forward(self, states, actions):
         xs = states.to(device)
         xa = actions.to(device)
         xs = F.relu(self.norm1(self.lin1_s(xs)))
-        xs = F.relu(self.lin2_s(xs))
-        xa = F.relu(self.lin1_a(xa))
-        return torch.add(xs, xa)
+        xs = self.lin2_s(xs)
+        xa = self.lin1_a(xa)
+        x = F.relu(torch.add(xs, xa))
+        return self.lin1(x)
 
 
+class OUNoise(object):
+    def __init__(self, action_space=env.action_space, mu=0.0, theta=0.15, max_sigma=0.3, min_sigma=0.3, decay_period=100000):
+        self.mu           = mu
+        self.theta        = theta
+        self.sigma        = max_sigma
+        self.max_sigma    = max_sigma
+        self.min_sigma    = min_sigma
+        self.decay_period = decay_period
+        self.action_dim   = action_space.shape[0]
+        self.low          = action_space.low
+        self.high         = action_space.high
+        self.reset()
+        
+    def reset(self):
+        self.state = np.ones(self.action_dim) * self.mu
+        
+    def evolve_state(self):
+        x  = self.state
+        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(self.action_dim)
+        self.state = x + dx
+        return self.state
+    
+    def get_action(self, action, t=0):
+        ou_state = self.evolve_state()
+        self.sigma = self.max_sigma - (self.max_sigma - self.min_sigma) * min(1.0, t / self.decay_period)
+        return np.clip(action + ou_state, self.low, self.high)
 
 class Agent():
     def __init__(self, state_space, action_space, gamma, memory_size, learning_rate, tau, batch_size):
@@ -94,15 +123,19 @@ class Agent():
         self.critic_policy = DQNN_critic(state_space, action_space)
         self.actor_tgt = DQNN_actor(state_space, action_space)
         self.critic_tgt = DQNN_critic(state_space, action_space)
+        self.noise = OUNoise()
         self.tau = tau
         self.gamma = gamma
+        self.noise = OUNoise(action_space)
         self.num_actions = action_space
         self.batch_size = batch_size
         self.memory = ExperienceMemory(memory_size)
         #self.optimizer = optim.RMSprop(self.policy_net.parameters())
-        self.optimizer = optim.Adam(self.policy_net.parameters(), learning_rate)
+        self.optimizer_actor = optim.Adam(self.actor_policy.parameters(), learning_rate)
+        self.optimizer_critic = optim.Adam(self.critic_policy.parameters(), learning_rate)
         self.loss_func = nn.MSELoss()
-        self.last_loss = 999
+        self.last_loss_critic = 999
+        self.last_loss_actor = 999
     def select_act(self, state):
         self.actor_policy.eval()
         with torch.no_grad():
@@ -111,27 +144,43 @@ class Agent():
         if len(self.memory) < self.batch_size:
             return
         else:    
+            self.actor_policy.train()
             next_states, rewards, actions, states, done = list(zip(*self.memory.sample(self.batch_size)))
             next_states_stack = torch.cat(next_states, dim=0)
             rewards_stack = torch.stack(rewards, dim=0)
             actions_stack = torch.stack(actions, dim=0)
             states_stack = torch.cat(states, dim=0)
-            q_values = self.policy_net(states_stack).gather(1, actions_stack.view(-1,1))
-            next_state_maxes = self.tgt_net(next_states_stack).max(1)[0].unsqueeze(1).detach()
-            target_q_values = rewards_stack.unsqueeze(1) + self.gamma * next_state_maxes
-            self.optimizer.zero_grad()
-            loss = self.loss_func(q_values, target_q_values)
-            #loss = F.mse_loss(q_values, target_q_values)
-            self.last_loss = loss.item()
-            loss.backward()
-            for param in self.policy_net.parameters():
-                param.grad.data.clamp_(-1, 1)
-            self.optimizer.step()
+            next_actions = self.actor_tgt(next_states_stack)
+            q_values = self.critic_policy(states_stack, actions_stack)
+            target_q_values = rewards_stack.unsqueeze(1) + self.gamma * self.critic_tgt(next_states_stack, next_actions)
+            for i in range(self.batch_size):
+                if done[i]: target_q_values[i] = rewards_stack[i]
+            self.optimizer_critic.zero_grad()
+            loss_critic = self.loss_func(q_values, target_q_values)
+            #self.last_loss_critic = loss_critic.item()
+            loss_critic.backward()
+            #for param in self.critic_policy.parameters():
+            #    param.grad.data.clamp_(-1, 1)
+            self.optimizer_critic.step()
+
+            policy_actions = self.actor_policy(states_stack)
+            actions_qvalues = self.critic_tgt(states_stack, policy_actions)
+            self.optimizer_actor.zero_grad()
+            #try sum?
+            loss_actor = -torch.mean(actions_qvalues)
+            #self.last_loss_actor = loss_actor.item()
+            loss_actor.backward()
+            #for param in self.actor_policy.parameters():
+            #    param.grad.data.clamp_(-1, 1)
+            self.optimizer_actor.step()    
+            self._update_tgt_nets(self.actor_policy, self.actor_tgt)
+            self._update_tgt_nets(self.critic_policy, self.critic_tgt)
             
-    def update_tgt_net(self):
-        self.tgt_net.load_state_dict(self.policy_net.state_dict())        
-    def get_last_loss(self):
-        return self.last_loss    
+    def _update_tgt_nets(self, policy, target):
+        for policy_param, target_param in zip(policy.parameters(), target.parameters()):
+            target_param.data.copy_(self.tau*policy_param.data + (1.0-self.tau)*target_param.data)      
+    def get_last_losses(self):
+        return self.last_loss_critic, self.last_loss_actor
 
 
 
@@ -142,27 +191,22 @@ steps_done = 0
 
 action_space = 4
 state_space = 24
-tgt_update_interval = 10
-batch_size = 64
-epsilon = 0.99
-eps_decay = 0.995
-eps_min = 0.05
-gamma = 0.95
-memory_size = 10000
+batch_size = 32
+tau = 0.001
+gamma = 0.99
+memory_size = 100000
 lr = 0.0001
-agnt = Agent(state_space,action_space, gamma, memory_size, lr, epsilon, eps_decay, eps_min, batch_size)
+agnt = Agent(state_space,action_space, gamma, memory_size, lr, tau, batch_size)
 done_reward = 0
 
 with mlflow.start_run():
-    mlflow.log_param("tgt_update_interval", tgt_update_interval)
     mlflow.log_param("memory_size", memory_size)
-    mlflow.log_param("epsilon", epsilon)
-    mlflow.log_param("eps_decay", eps_decay)
-    mlflow.log_param("eps_min", eps_min)
+    mlflow.log_param("tau", tau)
     mlflow.log_param("gamma", gamma)
-    mlflow.log_param("model", str(agnt.policy_net))
+    mlflow.log_param("actor_model", str(agnt.actor_policy))
+    mlflow.log_param("critic_model", str(agnt.critic_policy))
     mlflow.log_param("loss", str(agnt.loss_func))
-    mlflow.log_param("optmizer", str(agnt.optimizer))
+    mlflow.log_param("optmizer", str(agnt.optimizer_actor))
     mlflow.log_param("lr", lr)
     mlflow.log_param("done_reward", done_reward)
     mlflow.log_param("batch_size", batch_size)
@@ -170,27 +214,26 @@ with mlflow.start_run():
     for e in range(episodes):
         state = env.reset()
         state = torch.tensor(state, dtype=torch.float).unsqueeze(0)
-        for t in count():
+        for t in range(500):
             env.render()
-            action = agnt.select_act(state)
-            #Test adding done in memory and checking it in learn
-            next_state, reward, done, _ = env.step(action.item())
+            action = agnt.select_act(state) + agnt.noise.get_action(action, t)
+            next_state, reward, done, _ = env.step(np.array(action))
             next_state = torch.tensor(next_state, dtype=torch.float).unsqueeze(0)
             if done:
-                reward = torch.tensor(done_reward)
+                reward = torch.tensor(reward, dtype=torch.float)
                 agnt.memory.store((next_state, reward, action, state, done))
-                print(f"Episode {e} finished after {t} timesteps")
+                last_loss_critic, last_loss_actor = agnt.get_last_losses()
+                print(f"Episode {e} finished after {t} timesteps, loss critic: {last_loss_critic}, {last_loss_actor}")
+                print(f"Last action: {action}")
                 episode_durations.append(t+1)
                 duration_means.append(sum(episode_durations[-100:]) / 100)
                 break
-            reward = torch.tensor(reward)
+            reward = torch.tensor(reward, dtype=torch.float)
             agnt.memory.store((next_state, reward, action, state, done))
             state = next_state
             agnt.learn()
             steps_done += 1
-            if t % tgt_update_interval:
-                agnt.update_tgt_net()
-    
+
         mlflow.log_metric("steps_done", steps_done)
         mlflow.log_metric("episodes done", e)
         mlflow.log_metric("last_avg_score", duration_means[-1])
