@@ -50,7 +50,7 @@ class ExperienceMemory():
         self.memory = deque([], maxlen=capacity)
     def store(self, transition):
         self.memory.append(transition)
-    def sample(self, batch_size=32):
+    def sample(self, batch_size):
         return random.sample(self.memory, batch_size)
     def __len__(self):
         return len(self.memory)    
@@ -74,23 +74,20 @@ class DQNN_actor(nn.Module):
 class DQNN_critic(nn.Module):
     def __init__(self, state_space, action_space):
         super(DQNN_critic, self).__init__()
-        self.lin1_s = nn.Linear(state_space+action_space, 400)
+        self.lin1 = nn.Linear(state_space+action_space, 400)
         #self.norm1_s = nn.BatchNorm1d(300)
-        self.lin2_s = nn.Linear(400,300)
+        self.lin2 = nn.Linear(400,300)
         #self.norm2_s = nn.BatchNorm1d(300)
         #self.norm1_a = nn.BatchNorm1d(300)
-        self.lin1 = nn.Linear(300, 1)
+        self.lin3 = nn.Linear(300, 1)
 
 
     def forward(self, states, actions):
         x = torch.cat((states, actions), dim=1).to(device)
-        xs = states.to(device)
-        xa = actions.to(device)
-        xs = F.relu(self.norm1_s(self.lin1_s(xs)))
-        xs = F.relu(self.norm2_s(self.lin2_s(xs)))
-        xa = F.relu(self.norm1_a(self.lin1_a(xa)))
-        x = F.relu(torch.add(xs, xa))
-        return self.lin1(x)
+        x = F.relu(self.lin1(x))
+        x = F.relu(self.lin2(x))
+        x = F.relu(self.lin3(x))
+        return x
 
 
 class OUNoise(object):
@@ -198,7 +195,7 @@ state_space = 24
 batch_size = 64
 tau = 0.003
 gamma = 0.99
-memory_size = 1000000
+memory_size = 500000
 lr_actor = 0.0001
 lr_critic = 0.0001
 agnt = Agent(state_space,action_space, gamma, memory_size, lr_actor, lr_critic, tau, batch_size)
