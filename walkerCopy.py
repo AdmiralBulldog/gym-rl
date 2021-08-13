@@ -35,12 +35,12 @@ fig, ax = plt.subplots()
 
 def plot_animate(i):
     ax.clear()
-    ax.set_ylabel('duration')
+    ax.set_ylabel('score')
     ax.set_xlabel('episode')
     ax.set_title('Training')
 
-    ax.plot(episode_scores, label='episode duration')
-    ax.plot(score_means, label='duration 100 MA')
+    ax.plot(episode_scores, label='episode score')
+    ax.plot(score_means, label='score 100 MA')
     
 
 ani = animation.FuncAnimation(fig, plot_animate, interval=1000)
@@ -64,12 +64,13 @@ class DQNN_actor(nn.Module):
         self.lin2 = nn.Linear(400,300)
         self.norm2 = nn.BatchNorm1d(300)
         self.lin3 = nn.Linear(300, action_space)
-        nn.init.uniform_(self.lin3.weight, a=-0.003, b=0.003)
+        nn.init.uniform_(self.lin3.weight, a=-0.0001, b=0.0001)
 
     def forward(self, x):
         x = x.to(device)
         x = F.relu(self.norm1(self.lin1(x)))
         x = F.relu(self.norm2(self.lin2(x)))
+        #Try adding noise here before tanh
         x = torch.tanh(self.lin3(x))
         return x
 
@@ -99,37 +100,13 @@ class DQNN_critic(nn.Module):
         return x
 
 
-class OUNoise(object):
-    def __init__(self, action_space=env.action_space, mu=0.0, theta=0.15, sigma=0.2):
-        self.mu           = mu
-        self.theta        = theta
-        self.sigma        = sigma
-        self.action_dim   = action_space.shape[0]
-        self.low          = action_space.low
-        self.high         = action_space.high
-        self.reset()
-        
-    def reset(self):
-        self.state = np.ones(self.action_dim) * self.mu
-        
-    def evolve_state(self):
-        x  = self.state
-        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(self.action_dim)
-        self.state = x + dx
-        return self.state
-    
-    def get_action(self, action):
-        #self.sigma = self.max_sigma - (self.max_sigma - self.min_sigma) * min(1.0, t / self.decay_period)
-        ou_state = self.evolve_state()
-        return np.clip(action + ou_state, self.low, self.high)
 
 class Agent():
     def __init__(self, state_space, action_space, gamma, memory_size, learning_rate_actor, learning_rate_critic, tau, batch_size):
-        self.actor_policy = DQNN_actor(state_space, action_space)
-        self.critic_policy = DQNN_critic(state_space, action_space)
-        self.actor_tgt = DQNN_actor(state_space, action_space)
-        self.critic_tgt = DQNN_critic(state_space, action_space)
-        self.noise = OUNoise()
+        self.actor_policy = DQNN_actor(state_space, action_space).to(device)
+        self.critic_policy = DQNN_critic(state_space, action_space).to(device)
+        self.actor_tgt = DQNN_actor(state_space, action_space).to(device)
+        self.critic_tgt = DQNN_critic(state_space, action_space).to(device)
         self.tau = tau
         self.gamma = gamma
         self.num_actions = action_space
@@ -198,15 +175,21 @@ steps_done = 0
 
 action_space = 4
 state_space = 24
-batch_size = 32
-tau = 0.001
+batch_size = 100
+tau = 0.05
 gamma = 0.99
-memory_size = 1000000
-lr_actor = 0.0001
-lr_critic = 0.001
+memory_size = 500000
+lr_actor = 0.001
+lr_critic = 0.002
+
+epsilon_max = 0.2
+epsilon = epsilon_max
+epsilon_decay = 0.994
+epsilon_cycle_decay = 0.8
+epsilon_min = 0.1
+
 agnt = Agent(state_space,action_space, gamma, memory_size, lr_actor, lr_critic, tau, batch_size)
 done_reward = 0
-agnt.noise.reset()
 with mlflow.start_run():
     mlflow.log_param("memory_size", memory_size)
     mlflow.log_param("tau", tau)
@@ -222,25 +205,29 @@ with mlflow.start_run():
     mlflow.log_param("batch_size", batch_size)
 
     for e in range(episodes):
-        agnt.noise.reset()
         state = env.reset()
-        state = torch.tensor(state, dtype=torch.float).unsqueeze(0)
+        state = torch.tensor(state, dtype=torch.float, device=device).unsqueeze(0)
         episode_reward = 0
-        for t in range(700):
-            
+        for t in range(2000):
             env.render()
             action = agnt.select_act(state)
-            action = agnt.noise.get_action(np.array(action))
-            next_state, reward, done, _ = env.step(action)
+            action += torch.normal(0, epsilon, size=(action_space,), dtype=torch.float, device=device)
+            next_state, reward, done, _ = env.step(np.array(action.cpu()))
+            #if (abs(next_state[1:4]) < 0.000001).all():
+            #    reward -= 1.5
             episode_reward += reward
-            next_state = torch.tensor(next_state, dtype=torch.float).unsqueeze(0)
+            next_state = torch.tensor(next_state, dtype=torch.float, device=device).unsqueeze(0)
             if done:
-                reward = torch.tensor(reward, dtype=torch.float)
-                agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float), state, done))
+                reward = torch.tensor(reward, dtype=torch.float, device=device)
+                agnt.memory.store((next_state, reward, action, state, done))
+                epsilon *= epsilon_decay
+                if epsilon < epsilon_min:
+                    epsilon_max *= epsilon_cycle_decay
+                    epsilon_min *= epsilon_cycle_decay
+                    epsilon = epsilon_max
                 break
-            #if t == 1999: reward = -100
-            reward = torch.tensor(reward, dtype=torch.float)
-            agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float), state, done))
+            reward = torch.tensor(reward, dtype=torch.float, device=device)
+            agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
             state = next_state
             agnt.learn()
             steps_done += 1
@@ -248,7 +235,6 @@ with mlflow.start_run():
         score_means.append(sum(episode_scores[-100:]) / 100)
         last_loss_critic, last_loss_actor = agnt.get_last_losses()
         print(f"Episode {e} finished after {t} timesteps, loss critic: {last_loss_critic}, {last_loss_actor}")
-        print(f"Weights: {agnt.actor_policy.lin3.weight[:10]}\nGradients: {agnt.actor_policy.lin3.weight.grad[:10]}")
         mlflow.log_metric("steps_done", steps_done)
         mlflow.log_metric("episodes done", e)
         mlflow.log_metric("last_avg_score", score_means[-1])

@@ -35,12 +35,12 @@ fig, ax = plt.subplots()
 
 def plot_animate(i):
     ax.clear()
-    ax.set_ylabel('duration')
+    ax.set_ylabel('score')
     ax.set_xlabel('episode')
     ax.set_title('Training')
 
-    ax.plot(episode_scores, label='episode duration')
-    ax.plot(score_means, label='duration 100 MA')
+    ax.plot(episode_scores, label='episode score')
+    ax.plot(score_means, label='score 100 MA')
     
 
 ani = animation.FuncAnimation(fig, plot_animate, interval=1000)
@@ -50,57 +50,63 @@ class ExperienceMemory():
         self.memory = deque([], maxlen=capacity)
     def store(self, transition):
         self.memory.append(transition)
-    def sample(self, batch_size=32):
+    def sample(self, batch_size):
         return random.sample(self.memory, batch_size)
     def __len__(self):
         return len(self.memory)    
 
 class DQNN_actor(nn.Module):
     def __init__(self, state_space, action_space):
+        #Try batch norm to state input
+        #Try wiout batchnorm
         super(DQNN_actor, self).__init__()
         self.lin1 = nn.Linear(state_space, 400)
-        #self.norm1 = nn.BatchNorm1d(400)
+        self.norm1 = nn.BatchNorm1d(400)
         self.lin2 = nn.Linear(400,300)
-        #self.norm2 = nn.BatchNorm1d(300)
+        self.norm2 = nn.BatchNorm1d(300)
         self.lin3 = nn.Linear(300, action_space)
+        nn.init.uniform_(self.lin3.weight, a=-0.003, b=0.003)
 
     def forward(self, x):
         x = x.to(device)
-        x = F.relu(self.lin1(x))
-        x = F.relu(self.lin2(x))
+        x = F.relu(self.norm1(self.lin1(x)))
+        x = F.relu(self.norm2(self.lin2(x)))
         x = torch.tanh(self.lin3(x))
         return x
 
 class DQNN_critic(nn.Module):
     def __init__(self, state_space, action_space):
         super(DQNN_critic, self).__init__()
-        self.lin1_s = nn.Linear(state_space+action_space, 400)
-        #self.norm1_s = nn.BatchNorm1d(300)
+        #self.lin1 = nn.Linear(state_space+action_space, 400)
+        #self.norm1 = nn.BatchNorm1d(400)
+        #self.lin2 = nn.Linear(400,300)
+        #self.norm2 = nn.BatchNorm1d(300)
+        #self.lin3 = nn.Linear(300, 1)
+        self.lin1_s = nn.Linear(state_space, 400)
+        self.norm1 = nn.BatchNorm1d(400)
         self.lin2_s = nn.Linear(400,300)
-        #self.norm2_s = nn.BatchNorm1d(300)
-        #self.norm1_a = nn.BatchNorm1d(300)
-        self.lin1 = nn.Linear(300, 1)
+        self.lin1_a = nn.Linear(action_space, 300)
+        self.lin3 = nn.Linear(300, 1)
+        nn.init.uniform_(self.lin3.weight, a=-0.003, b=0.003)
 
 
     def forward(self, states, actions):
-        x = torch.cat((states, actions), dim=1).to(device)
+        #TRY CONCAT
+        #Try more batchnorm
         xs = states.to(device)
         xa = actions.to(device)
-        xs = F.relu(self.norm1_s(self.lin1_s(xs)))
-        xs = F.relu(self.norm2_s(self.lin2_s(xs)))
-        xa = F.relu(self.norm1_a(self.lin1_a(xa)))
-        x = F.relu(torch.add(xs, xa))
-        return self.lin1(x)
+        xs = F.relu(self.norm1(self.lin1_s(xs)))
+        xs = F.relu(self.lin2_s(xs))
+        xa = F.relu(self.lin1_a(xa))
+        x = self.lin3(torch.add(xs,xa))
+        return x
 
 
 class OUNoise(object):
-    def __init__(self, action_space=env.action_space, mu=0.0, theta=0.15, max_sigma=0.3, min_sigma=0.3, decay_period=2000):
+    def __init__(self, action_space=env.action_space, mu=0.0, theta=0.15, sigma=0.2):
         self.mu           = mu
         self.theta        = theta
-        self.sigma        = max_sigma
-        self.max_sigma    = max_sigma
-        self.min_sigma    = min_sigma
-        self.decay_period = decay_period
+        self.sigma        = sigma
         self.action_dim   = action_space.shape[0]
         self.low          = action_space.low
         self.high         = action_space.high
@@ -115,17 +121,17 @@ class OUNoise(object):
         self.state = x + dx
         return self.state
     
-    def get_action(self, action, t=0):
+    def get_action(self, action):
+        #self.sigma = self.max_sigma - (self.max_sigma - self.min_sigma) * min(1.0, t / self.decay_period)
         ou_state = self.evolve_state()
-        self.sigma = self.max_sigma - (self.max_sigma - self.min_sigma) * min(1.0, t / self.decay_period)
         return np.clip(action + ou_state, self.low, self.high)
 
 class Agent():
     def __init__(self, state_space, action_space, gamma, memory_size, learning_rate_actor, learning_rate_critic, tau, batch_size):
-        self.actor_policy = DQNN_actor(state_space, action_space)
-        self.critic_policy = DQNN_critic(state_space, action_space)
-        self.actor_tgt = DQNN_actor(state_space, action_space)
-        self.critic_tgt = DQNN_critic(state_space, action_space)
+        self.actor_policy = DQNN_actor(state_space, action_space).to(device)
+        self.critic_policy = DQNN_critic(state_space, action_space).to(device)
+        self.actor_tgt = DQNN_actor(state_space, action_space).to(device)
+        self.critic_tgt = DQNN_critic(state_space, action_space).to(device)
         self.noise = OUNoise()
         self.tau = tau
         self.gamma = gamma
@@ -133,8 +139,8 @@ class Agent():
         self.batch_size = batch_size
         self.memory = ExperienceMemory(memory_size)
         #self.optimizer = optim.RMSprop(self.policy_net.parameters())
-        self.optimizer_actor = optim.Adam(self.actor_policy.parameters(), learning_rate_actor)
-        self.optimizer_critic = optim.Adam(self.critic_policy.parameters(), learning_rate_critic)
+        self.optimizer_actor = optim.Adam(self.actor_policy.parameters(), lr=learning_rate_actor)
+        self.optimizer_critic = optim.Adam(self.critic_policy.parameters(), lr=learning_rate_critic, weight_decay=0.001)
         self.loss_func = nn.MSELoss()
         self.last_loss_critic = 999
         self.last_loss_actor = 999
@@ -170,7 +176,7 @@ class Agent():
             policy_actions = self.actor_policy(states_stack)
             actions_qvalues = self.critic_tgt(states_stack, policy_actions)
             self.optimizer_actor.zero_grad()
-            #try sum?
+            #CHECK IF MEAN WORKS AS EXPECTED
             loss_actor = -torch.mean(actions_qvalues)
             #self.last_loss_actor = loss_actor.item()
             loss_actor.backward()
@@ -195,15 +201,14 @@ steps_done = 0
 
 action_space = 4
 state_space = 24
-batch_size = 64
-tau = 0.003
+batch_size = 100
+tau = 0.001
 gamma = 0.99
 memory_size = 1000000
 lr_actor = 0.0001
-lr_critic = 0.0001
+lr_critic = 0.001
 agnt = Agent(state_space,action_space, gamma, memory_size, lr_actor, lr_critic, tau, batch_size)
-done_reward = 0
-agnt.noise.reset()
+done_reward = -100
 with mlflow.start_run():
     mlflow.log_param("memory_size", memory_size)
     mlflow.log_param("tau", tau)
@@ -219,24 +224,23 @@ with mlflow.start_run():
     mlflow.log_param("batch_size", batch_size)
 
     for e in range(episodes):
+        agnt.noise.reset()
         state = env.reset()
-        state = torch.tensor(state, dtype=torch.float).unsqueeze(0)
+        state = torch.tensor(state, dtype=torch.float, device=device).unsqueeze(0)
         episode_reward = 0
         for t in range(700):
-            
             env.render()
-            action = agnt.select_act(state)
-            action = agnt.noise.get_action(np.array(action), e)
+            action = agnt.select_act(state).cpu()
+            action = agnt.noise.get_action(np.array(action))
             next_state, reward, done, _ = env.step(action)
             episode_reward += reward
-            next_state = torch.tensor(next_state, dtype=torch.float).unsqueeze(0)
+            next_state = torch.tensor(next_state, dtype=torch.float, device=device).unsqueeze(0)
             if done:
-                reward = torch.tensor(reward, dtype=torch.float)
-                agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float), state, done))
+                reward = torch.tensor(reward, dtype=torch.float, device=device)
+                agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
                 break
-            #if t == 1999: reward = -100
-            reward = torch.tensor(reward, dtype=torch.float)
-            agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float), state, done))
+            reward = torch.tensor(reward, dtype=torch.float, device=device)
+            agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
             state = next_state
             agnt.learn()
             steps_done += 1
