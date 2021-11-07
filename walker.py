@@ -60,6 +60,7 @@ class DQNN_actor(nn.Module):
         #Try batch norm to state input
         #Try wiout batchnorm
         super(DQNN_actor, self).__init__()
+        self.norm0 = nn.BatchNorm1d(state_space)
         self.lin1 = nn.Linear(state_space, 400)
         self.norm1 = nn.BatchNorm1d(400)
         self.lin2 = nn.Linear(400,300)
@@ -68,7 +69,7 @@ class DQNN_actor(nn.Module):
         nn.init.uniform_(self.lin3.weight, a=-0.003, b=0.003)
 
     def forward(self, x):
-        x = x.to(device)
+        x = self.norm0(x.to(device))
         x = F.relu(self.norm1(self.lin1(x)))
         x = F.relu(self.norm2(self.lin2(x)))
         x = torch.tanh(self.lin3(x))
@@ -103,7 +104,7 @@ class DQNN_critic(nn.Module):
 
 
 class OUNoise(object):
-    def __init__(self, action_space=env.action_space, mu=0.0, theta=0.15, sigma=0.2):
+    def __init__(self, action_space=env.action_space, mu=0.0, theta=0.15, sigma=0.30):
         self.mu           = mu
         self.theta        = theta
         self.sigma        = sigma
@@ -202,10 +203,10 @@ steps_done = 0
 action_space = 4
 state_space = 24
 batch_size = 100
-tau = 0.001
+tau = 0.003
 gamma = 0.99
 memory_size = 1000000
-lr_actor = 0.0001
+lr_actor = 0.001
 lr_critic = 0.001
 agnt = Agent(state_space,action_space, gamma, memory_size, lr_actor, lr_critic, tau, batch_size)
 done_reward = -100
@@ -222,6 +223,9 @@ with mlflow.start_run():
 
     mlflow.log_param("done_reward", done_reward)
     mlflow.log_param("batch_size", batch_size)
+    mlflow.log_param("theta", agnt.noise.theta)
+    mlflow.log_param("sigma", agnt.noise.sigma)
+    
 
     for e in range(episodes):
         agnt.noise.reset()
@@ -233,14 +237,19 @@ with mlflow.start_run():
             action = agnt.select_act(state).cpu()
             action = agnt.noise.get_action(np.array(action))
             next_state, reward, done, _ = env.step(action)
+            #reward += next_state[2]
             episode_reward += reward
+            
+            #TRY: If reward is positive, add it to replaybuffer 10 times
             next_state = torch.tensor(next_state, dtype=torch.float, device=device).unsqueeze(0)
-            if done:
-                reward = torch.tensor(reward, dtype=torch.float, device=device)
-                agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
-                break
             reward = torch.tensor(reward, dtype=torch.float, device=device)
-            agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
+            if reward > 0:
+                for _ in range(10):
+                    agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
+            else:
+                agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
+            if done:
+                break
             state = next_state
             agnt.learn()
             steps_done += 1
@@ -252,6 +261,7 @@ with mlflow.start_run():
         mlflow.log_metric("episodes done", e)
         mlflow.log_metric("last_avg_score", score_means[-1])
         mlflow.log_metric("last_score", episode_scores[-1])
+        
             
 
 env.close()        
