@@ -58,19 +58,20 @@ class ExperienceMemory():
 class DQNN_actor(nn.Module):
     def __init__(self, state_space, action_space):
         #Try batch norm to state input
+        #Try wiout batchnorm
         super(DQNN_actor, self).__init__()
+        self.norm0 = nn.BatchNorm1d(state_space)
         self.lin1 = nn.Linear(state_space, 400)
         self.norm1 = nn.BatchNorm1d(400)
         self.lin2 = nn.Linear(400,300)
         self.norm2 = nn.BatchNorm1d(300)
         self.lin3 = nn.Linear(300, action_space)
-        nn.init.uniform_(self.lin3.weight, a=-0.0001, b=0.0001)
+        nn.init.uniform_(self.lin3.weight, a=-0.003, b=0.003)
 
     def forward(self, x):
-        x = x.to(device)
+        x = self.norm0(x.to(device))
         x = F.relu(self.norm1(self.lin1(x)))
         x = F.relu(self.norm2(self.lin2(x)))
-        #Try adding noise here before tanh
         x = torch.tanh(self.lin3(x))
         return x
 
@@ -91,6 +92,8 @@ class DQNN_critic(nn.Module):
 
 
     def forward(self, states, actions):
+        #TRY CONCAT
+        #Try more batchnorm
         xs = states.to(device)
         xa = actions.to(device)
         xs = F.relu(self.norm1(self.lin1_s(xs)))
@@ -100,6 +103,29 @@ class DQNN_critic(nn.Module):
         return x
 
 
+class OUNoise(object):
+    def __init__(self, action_space=env.action_space, mu=0.0, theta=0.15, sigma=0.30):
+        self.mu           = mu
+        self.theta        = theta
+        self.sigma        = sigma
+        self.action_dim   = action_space.shape[0]
+        self.low          = action_space.low
+        self.high         = action_space.high
+        self.reset()
+        
+    def reset(self):
+        self.state = np.ones(self.action_dim) * self.mu
+        
+    def evolve_state(self):
+        x  = self.state
+        dx = self.theta * (self.mu - x) + self.sigma * np.random.randn(self.action_dim)
+        self.state = x + dx
+        return self.state
+    
+    def get_action(self, action):
+        #self.sigma = self.max_sigma - (self.max_sigma - self.min_sigma) * min(1.0, t / self.decay_period)
+        ou_state = self.evolve_state()
+        return np.clip(action + ou_state, self.low, self.high)
 
 class Agent():
     def __init__(self, state_space, action_space, gamma, memory_size, learning_rate_actor, learning_rate_critic, tau, batch_size):
@@ -107,6 +133,7 @@ class Agent():
         self.critic_policy = DQNN_critic(state_space, action_space).to(device)
         self.actor_tgt = DQNN_actor(state_space, action_space).to(device)
         self.critic_tgt = DQNN_critic(state_space, action_space).to(device)
+        self.noise = OUNoise()
         self.tau = tau
         self.gamma = gamma
         self.num_actions = action_space
@@ -150,7 +177,7 @@ class Agent():
             policy_actions = self.actor_policy(states_stack)
             actions_qvalues = self.critic_tgt(states_stack, policy_actions)
             self.optimizer_actor.zero_grad()
-            #try sum?
+            #CHECK IF MEAN WORKS AS EXPECTED
             loss_actor = -torch.mean(actions_qvalues)
             #self.last_loss_actor = loss_actor.item()
             loss_actor.backward()
@@ -176,20 +203,13 @@ steps_done = 0
 action_space = 4
 state_space = 24
 batch_size = 100
-tau = 0.05
+tau = 0.001
 gamma = 0.99
-memory_size = 500000
-lr_actor = 0.001
-lr_critic = 0.002
-
-epsilon_max = 0.2
-epsilon = epsilon_max
-epsilon_decay = 0.994
-epsilon_cycle_decay = 0.8
-epsilon_min = 0.1
-
+memory_size = 1000000
+lr_actor = 0.0001
+lr_critic = 0.001
 agnt = Agent(state_space,action_space, gamma, memory_size, lr_actor, lr_critic, tau, batch_size)
-done_reward = 0
+done_reward = -100
 with mlflow.start_run():
     mlflow.log_param("memory_size", memory_size)
     mlflow.log_param("tau", tau)
@@ -203,31 +223,37 @@ with mlflow.start_run():
 
     mlflow.log_param("done_reward", done_reward)
     mlflow.log_param("batch_size", batch_size)
+    mlflow.log_param("theta", agnt.noise.theta)
+    mlflow.log_param("sigma", agnt.noise.sigma)
+    
 
     for e in range(episodes):
+        agnt.noise.reset()
         state = env.reset()
         state = torch.tensor(state, dtype=torch.float, device=device).unsqueeze(0)
         episode_reward = 0
-        for t in range(2000):
+        for t in range(700):
             env.render()
-            action = agnt.select_act(state)
-            action += torch.normal(0, epsilon, size=(action_space,), dtype=torch.float, device=device)
-            next_state, reward, done, _ = env.step(np.array(action.cpu()))
-            #if (abs(next_state[1:4]) < 0.000001).all():
-            #    reward -= 1.5
+            action = agnt.select_act(state).cpu()
+            action = agnt.noise.get_action(np.array(action))
+            next_state, reward, done, _ = env.step(action)
+            #reward += next_state[2]
             episode_reward += reward
+            
+            
             next_state = torch.tensor(next_state, dtype=torch.float, device=device).unsqueeze(0)
-            if done:
-                reward = torch.tensor(reward, dtype=torch.float, device=device)
-                agnt.memory.store((next_state, reward, action, state, done))
-                epsilon *= epsilon_decay
-                if epsilon < epsilon_min:
-                    epsilon_max *= epsilon_cycle_decay
-                    epsilon_min *= epsilon_cycle_decay
-                    epsilon = epsilon_max
-                break
             reward = torch.tensor(reward, dtype=torch.float, device=device)
-            agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
+
+            print(f"{action=}")
+            
+            # If reward is positive, add it to replaybuffer 10 times
+            if reward > 0:
+                for _ in range(10):
+                    agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
+            else:
+                agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
+            if done:
+                break
             state = next_state
             agnt.learn()
             steps_done += 1
@@ -239,6 +265,7 @@ with mlflow.start_run():
         mlflow.log_metric("episodes done", e)
         mlflow.log_metric("last_avg_score", score_means[-1])
         mlflow.log_metric("last_score", episode_scores[-1])
+        
             
 
 env.close()        

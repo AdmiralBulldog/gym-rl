@@ -203,13 +203,17 @@ steps_done = 0
 action_space = 4
 state_space = 24
 batch_size = 100
-tau = 0.003
+tau = 0.001
 gamma = 0.99
 memory_size = 1000000
-lr_actor = 0.001
+lr_actor = 0.0001
 lr_critic = 0.001
 agnt = Agent(state_space,action_space, gamma, memory_size, lr_actor, lr_critic, tau, batch_size)
 done_reward = -100
+
+action_array = np.zeros((4,10))
+wiggling_tracker = [0]*4
+
 with mlflow.start_run():
     mlflow.log_param("memory_size", memory_size)
     mlflow.log_param("tau", tau)
@@ -235,14 +239,23 @@ with mlflow.start_run():
         for t in range(700):
             env.render()
             action = agnt.select_act(state).cpu()
-            action = agnt.noise.get_action(np.array(action))
+            action = agnt.noise.get_action(np.array(action))        
             next_state, reward, done, _ = env.step(action)
+            for i in range(len(action_array)):
+                action_array[i] = np.append(action_array[i][1:], action[i])
+            for i in range(len(action_array)):
+                actions = action_array[i]
+                wiggling_tracker[i] = np.count_nonzero(actions[1:] * actions[:-1] < 0)
+            
+            # punish for wiggling and not moving
+            #reward -= sum(wiggling_tracker)*0.5
+            reward -= np.count_nonzero(abs(action) < 0.01)*10
             #reward += next_state[2]
             episode_reward += reward
             
-            #TRY: If reward is positive, add it to replaybuffer 10 times
             next_state = torch.tensor(next_state, dtype=torch.float, device=device).unsqueeze(0)
             reward = torch.tensor(reward, dtype=torch.float, device=device)
+            # If reward is positive, add it to replaybuffer 10 times
             if reward > 0:
                 for _ in range(10):
                     agnt.memory.store((next_state, reward, torch.tensor(action, dtype=torch.float, device=device), state, done))
