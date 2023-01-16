@@ -26,11 +26,10 @@ plt.ion()
 device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
 
 
-
-
 episode_durations = []
 duration_means = []
 fig, ax = plt.subplots()
+
 
 def plot_animate(i):
     ax.clear()
@@ -44,6 +43,7 @@ def plot_animate(i):
 
 ani = animation.FuncAnimation(fig, plot_animate, interval=1000)
 
+
 def choose_loss(loss_f):
     if loss_f == "mse":
         return nn.MSELoss()
@@ -52,11 +52,13 @@ def choose_loss(loss_f):
     else:
         return 0    
 
+
 def choose_optim(optimizer, params, rate):
     if optimizer == "adam":
         return optim.Adam(params, lr=rate)
     else:
         return 0 
+
 
 class ExperienceMemory():
     def __init__(self, capacity):
@@ -86,7 +88,6 @@ class DQNN(nn.Module):
         return x
 
 
-
 class Agent():
     def __init__(self, state_space, action_space, gamma, memory_size, loss, optimizer, learning_rate, epsilon, eps_decay, eps_min):
         self.policy_net = DQNN(state_space, action_space)
@@ -102,6 +103,7 @@ class Agent():
         self.optimizer = choose_optim(optimizer, self.policy_net.parameters(), learning_rate)
         self.loss_func = choose_loss(loss)
         self.last_loss = 999
+
     def select_act(self, state):
         sample = random.random()
         self.epsilon = max(self.eps_min, self.epsilon * eps_decay)
@@ -110,6 +112,7 @@ class Agent():
         else:
             with torch.no_grad():
                 return self.policy_net(state).max(1)[1].squeeze()
+
     def learn(self):
         if len(self.memory) < self.batch_size:
             return
@@ -135,9 +138,9 @@ class Agent():
             
     def update_tgt_net(self):
         self.tgt_net.load_state_dict(self.policy_net.state_dict())        
+
     def get_last_loss(self):
         return self.last_loss    
-
 
 
 env.reset()
@@ -169,15 +172,17 @@ with mlflow.start_run():
     mlflow.log_param("loss", loss_f)
     mlflow.log_param("optmizer", optimizer)
     mlflow.log_param("lr", lr)
+
     for e in range(episodes):
         state = env.reset()
         state = torch.tensor(state, dtype=torch.float).unsqueeze(0)
+        
         for t in count():
             env.render()
             action = agnt.select_act(state)
-            #Test adding done in memory and checking it in learn
             next_state, reward, done, _ = env.step(action.item())
             next_state = torch.tensor(next_state, dtype=torch.float).unsqueeze(0)
+            
             if done:
                 reward = torch.tensor(0)
                 agnt.memory.store((next_state, reward, action, state, done))
@@ -185,11 +190,13 @@ with mlflow.start_run():
                 episode_durations.append(t+1)
                 duration_means.append(sum(episode_durations[-100:]) / 100)
                 break
+            
             reward = torch.tensor(reward)
             agnt.memory.store((next_state, reward, action, state, done))
             state = next_state
             agnt.learn()
             steps_done += 1
+
             if t % tgt_update_interval:
                 agnt.update_tgt_net()
     
