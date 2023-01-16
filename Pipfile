@@ -1,0 +1,17 @@
+[[source]]
+url = "https://pypi.org/simple"
+verify_ssl = true
+name = "pypi"
+
+[packages]
+gym = "==0.18.3"
+numpy = "*"
+matplotlib = "*"
+mlflow = "*"
+torch = "*"
+box2d = "==2.3.10"
+
+[dev-packages]
+
+[requires]
+python_version = "3.8"
